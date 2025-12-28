@@ -1,0 +1,26 @@
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+env/
+venv/
+
+# Data
+data/*.parquet
+data/*.zip
+data/*.gz
+data/*.json
+data/*.xlsx
+
+# Secrets
+configs/*.env
+*.env
+
+# Notebooks cache
+.ipynb_checkpoints/
+
+# Docker
+dist/
+build/
+*.log
