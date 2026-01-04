@@ -1,3 +1,4 @@
+
 # dashboards/streamlit_app.py
 
 import streamlit as st
@@ -29,26 +30,35 @@ def get_conn():
 
 conn = get_conn()
 
+# === Snowflake object names based on your SQL ===
+DB = "SNOWFLAKE_LEARNING_DB"
+SCHEMA = "PUBLIC"
+ACTUALS_TABLE = f"{DB}.{SCHEMA}.STOCK_SILVER"     # SNOWFLAKE_LEARNING_DB.PUBLIC.STOCK_SILVER
+FORECAST_TABLE = f"{DB}.{SCHEMA}.STOCK_FORECAST"  # SNOWFLAKE_LEARNING_DB.PUBLIC.STOCK_FORECAST
+
+# Column names in actuals table
+DATE_COL = "DT"
+CLOSE_COL = "CLOSE"
+SYMBOL_COL = "SYMBOL"
+
 # 4) Cached helpers (NO connection parameter!)
 @st.cache_data(ttl=600)
 def list_symbols() -> list[str]:
-    sql = "SELECT DISTINCT SYMBOL FROM STOCK_FORECAST ORDER BY SYMBOL"
+    sql = f"SELECT DISTINCT SYMBOL FROM {FORECAST_TABLE} ORDER BY SYMBOL"
     cur = conn.cursor()
     cur.execute(sql)
     symbols = [row[0] for row in cur.fetchall()]
     cur.close()
     return symbols
 
-
-
 @st.cache_data(ttl=600)
 def load_forecast(symbol: str) -> pd.DataFrame:
-    sql = """
+    sql = f"""
         SELECT 
             TRY_TO_DATE(DS) AS DS,
             TRY_TO_DOUBLE(YHAT) AS YHAT,
             SYMBOL
-        FROM STOCK_FORECAST
+        FROM {FORECAST_TABLE}
         WHERE SYMBOL = %(symbol)s
         ORDER BY DS
     """
@@ -64,14 +74,14 @@ def load_forecast(symbol: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=600)
 def load_actuals(symbol: str) -> pd.DataFrame:
-    sql = """
+    sql = f"""
         SELECT 
-            TRY_TO_DATE(DS) AS DS,
-            TRY_TO_DOUBLE(CLOSE) AS CLOSE,
-            SYMBOL
-        FROM STOCK_ACTUALS
-        WHERE SYMBOL = %(symbol)s
-        ORDER BY DS
+            TRY_TO_DATE({DATE_COL}) AS DS,
+            TRY_TO_DOUBLE({CLOSE_COL}) AS CLOSE,
+            {SYMBOL_COL} AS SYMBOL
+        FROM {ACTUALS_TABLE}
+        WHERE {SYMBOL_COL} = %(symbol)s
+        ORDER BY {DATE_COL}
     """
     cur = conn.cursor()
     cur.execute(sql, {"symbol": symbol})
@@ -83,11 +93,10 @@ def load_actuals(symbol: str) -> pd.DataFrame:
     df = df.dropna(subset=["DS", "CLOSE"])
     return df
 
-
 # 5) Sidebar — select from actual symbols present in Snowflake
 symbols = list_symbols()
 if not symbols:
-    st.error("No symbols found in STOCK_FORECAST. Verify your pipeline loaded data.")
+    st.error("No symbols found in forecast table. Verify your pipeline loaded data.")
     st.stop()
 
 symbol = st.sidebar.selectbox("Symbol", options=symbols, index=0)
