@@ -1,4 +1,3 @@
-
 # dashboards/streamlit_app.py
 
 import streamlit as st
@@ -14,21 +13,25 @@ if "snowflake" not in st.secrets:
     st.error("Missing [snowflake] secrets in Streamlit Cloud. Go to Settings → Secrets.")
     st.stop()
 
-# 3) Connect to Snowflake
-sf = st.secrets["snowflake"]
-conn = snowflake.connector.connect(
-    account=sf["account"],
-    user=sf["user"],
-    password=sf["password"],
-    warehouse=sf["warehouse"],
-    database=sf["database"],
-    schema=sf["schema"],
-    role=sf.get("role", None),
-)
+# 3) Connection as a cached *resource* (hash-safe)
+@st.cache_resource
+def get_conn():
+    sf = st.secrets["snowflake"]
+    return snowflake.connector.connect(
+        account=sf["account"],
+        user=sf["user"],
+        password=sf["password"],
+        warehouse=sf["warehouse"],
+        database=sf["database"],
+        schema=sf["schema"],
+        role=sf.get("role", None),
+    )
 
-# 4) Cached helpers
+conn = get_conn()
+
+# 4) Cached helpers (NO connection parameter!)
 @st.cache_data(ttl=600)
-def list_symbols(conn) -> list[str]:
+def list_symbols() -> list[str]:
     sql = "SELECT DISTINCT SYMBOL FROM STOCK_FORECAST ORDER BY SYMBOL"
     cur = conn.cursor()
     cur.execute(sql)
@@ -37,7 +40,7 @@ def list_symbols(conn) -> list[str]:
     return symbols
 
 @st.cache_data(ttl=600)
-def load_forecast(conn, symbol: str) -> pd.DataFrame:
+def load_forecast(symbol: str) -> pd.DataFrame:
     sql = """
         SELECT 
             TRY_TO_DATE(DS) AS DS,
@@ -58,8 +61,8 @@ def load_forecast(conn, symbol: str) -> pd.DataFrame:
     return df
 
 @st.cache_data(ttl=600)
-def load_actuals(conn, symbol: str) -> pd.DataFrame:
-    # If you don't have STOCK_ACTUALS, you can delete this function and the "Actuals panel" later
+def load_actuals(symbol: str) -> pd.DataFrame:
+    # If you don't have STOCK_ACTUALS, you can delete this function and the "Actuals panel".
     sql = """
         SELECT 
             TRY_TO_DATE(DS) AS DS,
@@ -80,7 +83,7 @@ def load_actuals(conn, symbol: str) -> pd.DataFrame:
     return df
 
 # 5) Sidebar — select from actual symbols present in Snowflake
-symbols = list_symbols(conn)
+symbols = list_symbols()
 if not symbols:
     st.error("No symbols found in STOCK_FORECAST. Verify your pipeline loaded data.")
     st.stop()
@@ -95,7 +98,7 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader(f"Actual Close — {symbol}")
     try:
-        df_actuals = load_actuals(conn, symbol)
+        df_actuals = load_actuals(symbol)
         st.caption(f"Actual rows: {len(df_actuals)}")
         if df_actuals.empty:
             st.warning(f"No actuals found for '{symbol}'.")
@@ -116,7 +119,7 @@ with col1:
 with col2:
     st.subheader(f"Forecast — {symbol}")
     try:
-        df_forecast = load_forecast(conn, symbol)
+        df_forecast = load_forecast(symbol)
 
         # Instrumentation to debug blank charts
         st.caption(f"Forecast rows: {len(df_forecast)}")
@@ -140,5 +143,4 @@ with col2:
     except Exception as e:
         st.exception(e)
 
-# 7) Optional: close connection
-conn.close()
+# 7) (Optional) No explicit conn.close(); cache_resource will keep it for the session
