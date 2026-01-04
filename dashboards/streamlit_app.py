@@ -1,46 +1,144 @@
-import pandas as pd
-import snowflake.connector
+
+# dashboards/streamlit_app.py
+
 import streamlit as st
+import pandas as pd
+import plotly.express as px
+import snowflake.connector
 
-st.set_page_config(page_title="Stocks Forecast", layout="wide")
-st.title("📈 Stocks — Actuals & Forecast")
+# 1) Page config
+st.set_page_config(page_title="Stocks — Actuals & Forecast", layout="wide")
 
-SF = st.secrets["snowflake"]  # Secrets will be set in Streamlit Cloud
+# 2) Secrets check
+if "snowflake" not in st.secrets:
+    st.error("Missing [snowflake] secrets in Streamlit Cloud. Go to Settings → Secrets.")
+    st.stop()
 
-@st.cache_data(ttl=300)
-def load_data():
-    conn = snowflake.connector.connect(
-        user=SF["user"], password=SF["password"], account=SF["account"],
-        warehouse=SF["warehouse"], database=SF["database"], schema=SF["schema"]
-    )
+# 3) Connect to Snowflake
+sf = st.secrets["snowflake"]
+conn = snowflake.connector.connect(
+    account=sf["account"],
+    user=sf["user"],
+    password=sf["password"],
+    warehouse=sf["warehouse"],
+    database=sf["database"],
+    schema=sf["schema"],
+    role=sf.get("role", None),
+)
+
+# 4) Cached helpers
+@st.cache_data(ttl=600)
+def list_symbols(conn) -> list[str]:
+    sql = "SELECT DISTINCT SYMBOL FROM STOCK_FORECAST ORDER BY SYMBOL"
     cur = conn.cursor()
+    cur.execute(sql)
+    symbols = [row[0] for row in cur.fetchall()]
+    cur.close()
+    return symbols
 
-    cur.execute("SELECT DISTINCT SYMBOL FROM V_STOCK_SILVER ORDER BY SYMBOL")
-    symbols = [r[0] for r in cur.fetchall()]
+@st.cache_data(ttl=600)
+def load_forecast(conn, symbol: str) -> pd.DataFrame:
+    sql = """
+        SELECT 
+            TRY_TO_DATE(DS) AS DS,
+            TRY_TO_DOUBLE(YHAT) AS YHAT,
+            SYMBOL
+        FROM STOCK_FORECAST
+        WHERE SYMBOL = ?
+        ORDER BY DS
+    """
+    cur = conn.cursor()
+    cur.execute(sql, (symbol,))
+    rows = cur.fetchall()
+    cur.close()
+    df = pd.DataFrame(rows, columns=["DS", "YHAT", "SYMBOL"])
+    df["DS"] = pd.to_datetime(df["DS"], errors="coerce")
+    df["YHAT"] = pd.to_numeric(df["YHAT"], errors="coerce")
+    df = df.dropna(subset=["DS", "YHAT"])
+    return df
 
-    cur.execute("SELECT SYMBOL, DT, CLOSE, VOLUME, RET_PCT FROM V_STOCK_SILVER")
-    silver = pd.DataFrame(cur.fetchall(), columns=["SYMBOL","DT","CLOSE","VOLUME","RET_PCT"])
+@st.cache_data(ttl=600)
+def load_actuals(conn, symbol: str) -> pd.DataFrame:
+    # If you don't have STOCK_ACTUALS, you can delete this function and the "Actuals panel" later
+    sql = """
+        SELECT 
+            TRY_TO_DATE(DS) AS DS,
+            TRY_TO_DOUBLE(CLOSE) AS CLOSE,
+            SYMBOL
+        FROM STOCK_ACTUALS
+        WHERE SYMBOL = ?
+        ORDER BY DS
+    """
+    cur = conn.cursor()
+    cur.execute(sql, (symbol,))
+    rows = cur.fetchall()
+    cur.close()
+    df = pd.DataFrame(rows, columns=["DS", "CLOSE", "SYMBOL"])
+    df["DS"] = pd.to_datetime(df["DS"], errors="coerce")
+    df["CLOSE"] = pd.to_numeric(df["CLOSE"], errors="coerce")
+    df = df.dropna(subset=["DS", "CLOSE"])
+    return df
 
-    cur.execute("SELECT SYMBOL, DS, YHAT, YHAT_LOWER, YHAT_UPPER FROM V_STOCK_FORECAST")
-    forecast = pd.DataFrame(cur.fetchall(), columns=["SYMBOL","DS","YHAT","YHAT_LOWER","YHAT_UPPER"])
+# 5) Sidebar — select from actual symbols present in Snowflake
+symbols = list_symbols(conn)
+if not symbols:
+    st.error("No symbols found in STOCK_FORECAST. Verify your pipeline loaded data.")
+    st.stop()
 
-    cur.close(); conn.close()
-    return symbols, silver, forecast
+symbol = st.sidebar.selectbox("Symbol", options=symbols, index=0)
 
-symbols, df_silver, df_forecast = load_data()
-symbol = st.sidebar.selectbox("Symbol", symbols)
+# 6) Layout & charts
+st.header("📈 Stocks — Actuals & Forecast")
+col1, col2 = st.columns(2)
 
-left, right = st.columns(2)
-
-s_actual = df_silver[df_silver["SYMBOL"] == symbol].sort_values("DT")
-s_fore   = df_forecast[df_forecast["SYMBOL"] == symbol].sort_values("DS")
-
-with left:
+# Actuals panel
+with col1:
     st.subheader(f"Actual Close — {symbol}")
-    st.line_chart(s_actual.set_index("DT")["CLOSE"])
+    try:
+        df_actuals = load_actuals(conn, symbol)
+        st.caption(f"Actual rows: {len(df_actuals)}")
+        if df_actuals.empty:
+            st.warning(f"No actuals found for '{symbol}'.")
+        else:
+            fig_actuals = px.line(
+                df_actuals,
+                x="DS",
+                y="CLOSE",
+                title=f"Actual Close — {symbol}",
+            )
+            fig_actuals.update_traces(line=dict(color="#F72585", width=2), opacity=1.0)
+            fig_actuals.update_layout(template="plotly_dark", xaxis_title="Date", yaxis_title="Close")
+            st.plotly_chart(fig_actuals, use_container_width=True)
+    except Exception as e:
+        st.exception(e)
 
-with right:
+# Forecast panel
+with col2:
     st.subheader(f"Forecast — {symbol}")
-    st.line_chart(s_fore.set_index("DS")[["YHAT","YHAT_LOWER","YHAT_UPPER"]])
+    try:
+        df_forecast = load_forecast(conn, symbol)
 
-st.caption("Pipeline: Databricks (ETL/ML) → Snowflake (storage) → Streamlit (viz)")
+        # Instrumentation to debug blank charts
+        st.caption(f"Forecast rows: {len(df_forecast)}")
+        st.write("Sample forecast rows:", df_forecast.head(5))
+        st.write("Dtypes:", df_forecast.dtypes.to_dict())
+        st.write("NaN counts:", df_forecast.isna().sum().to_dict())
+
+        if df_forecast.empty or df_forecast["YHAT"].isna().all():
+            st.warning(f"No forecast data (or all NaNs) for '{symbol}'. Try another symbol or check pipeline.")
+        else:
+            fig_forecast = px.line(
+                df_forecast,
+                x="DS",
+                y="YHAT",
+                title=f"Forecast — {symbol}",
+            )
+            # Ensure visible line on dark theme
+            fig_forecast.update_traces(line=dict(color="#4CC9F0", width=2), opacity=1.0)
+            fig_forecast.update_layout(template="plotly_dark", xaxis_title="Date", yaxis_title="Predicted Close")
+            st.plotly_chart(fig_forecast, use_container_width=True)
+    except Exception as e:
+        st.exception(e)
+
+# 7) Optional: close connection
+conn.close()
