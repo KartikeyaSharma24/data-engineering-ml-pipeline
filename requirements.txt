@@ -1,3 +1,10 @@
+streamlit
+pandas
+numpy
+plotly
+snowflake-connector-python
+sqlalchemy
+
 # Core app
 streamlit==1.39.0
 pandas>=2.0,<3.0
