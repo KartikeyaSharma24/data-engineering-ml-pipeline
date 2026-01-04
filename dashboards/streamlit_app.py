@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import snowflake.connector
+from datetime import date  # for date_input
 
 # 1) Page config
 st.set_page_config(page_title="Stocks — Actuals & Forecast", layout="wide")
@@ -72,6 +73,7 @@ def load_forecast(symbol: str) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=["DS", "YHAT", "SYMBOL", "YHAT_LOWER", "YHAT_UPPER"])
     df["DS"] = pd.to_datetime(df["DS"], errors="coerce")
     df["YHAT"] = pd.to_numeric(df["YHAT"], errors="coerce")
+    # Optional lower/upper
     for c in ["YHAT_LOWER", "YHAT_UPPER"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -107,30 +109,48 @@ if not symbols:
 
 symbol = st.sidebar.selectbox("Symbol", options=symbols, index=0)
 
-# Date range selector based on available data
+# Load both datasets once to derive min/max bounds
 df_actuals_all = load_actuals(symbol)
-if df_actuals_all.empty:
-    df_forecast_all = load_forecast(symbol)
-    if df_forecast_all.empty:
-        st.warning("No data available for this symbol.")
-        st.stop()
-    min_date = pd.to_datetime(df_forecast_all["DS"].min())
-    max_date = pd.to_datetime(df_forecast_all["DS"].max())
-else:
-    min_date = pd.to_datetime(df_actuals_all["DS"].min())
-    max_date = pd.to_datetime(df_actuals_all["DS"].max())
+df_forecast_all = load_forecast(symbol)
 
-start_date, end_date = st.sidebar.slider(
+# Compute bounds from whichever has data (union of dates)
+dates_all = pd.concat(
+    [
+        df_actuals_all[["DS"]] if not df_actuals_all.empty else pd.DataFrame(columns=["DS"]),
+        df_forecast_all[["DS"]] if not df_forecast_all.empty else pd.DataFrame(columns=["DS"]),
+    ],
+    ignore_index=True,
+)
+dates_all = dates_all.dropna()
+if dates_all.empty:
+    st.warning("No data available for this symbol.")
+    st.stop()
+
+min_date = pd.to_datetime(dates_all["DS"].min()).date()
+max_date = pd.to_datetime(dates_all["DS"].max()).date()
+
+# Date range input (returns datetime.date objects)
+selected_range = st.sidebar.date_input(
     "Date range",
-    value=(min_date, max_date),
+    (min_date, max_date),
     min_value=min_date,
     max_value=max_date,
 )
 
+# Handle single-date or range selection
+if isinstance(selected_range, tuple) and len(selected_range) == 2:
+    start_date, end_date = selected_range
+else:
+    start_date = selected_range
+    end_date = selected_range
+
+# Convert to Timestamps for filtering
+start_ts = pd.Timestamp(start_date)
+end_ts = pd.Timestamp(end_date)
+
 # Filtered frames for plotting
-df_actuals = df_actuals_all[(df_actuals_all["DS"] >= start_date) & (df_actuals_all["DS"] <= end_date)]
-df_forecast_all = load_forecast(symbol)
-df_forecast = df_forecast_all[(df_forecast_all["DS"] >= start_date) & (df_forecast_all["DS"] <= end_date)]
+df_actuals = df_actuals_all[(df_actuals_all["DS"] >= start_ts) & (df_actuals_all["DS"] <= end_ts)]
+df_forecast = df_forecast_all[(df_forecast_all["DS"] >= start_ts) & (df_forecast_all["DS"] <= end_ts)]
 
 # 6) Overlay first
 st.header("📈 Stocks — Actuals & Forecast")
