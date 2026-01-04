@@ -1,0 +1,11 @@
+# Core app
+streamlit==1.39.0
+pandas>=2.0,<3.0
+
+# Snowflake connector (with pandas extras)
+snowflake-connector-python[pandas]==3.10.1
+
+# Optional but recommended for charts and date handling
+pyarrow>=14.0.0
+numpy>=1.26
+python-dateutil>=2.8
