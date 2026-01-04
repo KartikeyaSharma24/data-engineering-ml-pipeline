@@ -39,6 +39,8 @@ def list_symbols() -> list[str]:
     cur.close()
     return symbols
 
+
+
 @st.cache_data(ttl=600)
 def load_forecast(symbol: str) -> pd.DataFrame:
     sql = """
@@ -47,11 +49,11 @@ def load_forecast(symbol: str) -> pd.DataFrame:
             TRY_TO_DOUBLE(YHAT) AS YHAT,
             SYMBOL
         FROM STOCK_FORECAST
-        WHERE SYMBOL = ?
+        WHERE SYMBOL = %(symbol)s
         ORDER BY DS
     """
     cur = conn.cursor()
-    cur.execute(sql, (symbol,))
+    cur.execute(sql, {"symbol": symbol})
     rows = cur.fetchall()
     cur.close()
     df = pd.DataFrame(rows, columns=["DS", "YHAT", "SYMBOL"])
@@ -62,18 +64,17 @@ def load_forecast(symbol: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=600)
 def load_actuals(symbol: str) -> pd.DataFrame:
-    # If you don't have STOCK_ACTUALS, you can delete this function and the "Actuals panel".
     sql = """
         SELECT 
             TRY_TO_DATE(DS) AS DS,
             TRY_TO_DOUBLE(CLOSE) AS CLOSE,
             SYMBOL
         FROM STOCK_ACTUALS
-        WHERE SYMBOL = ?
+        WHERE SYMBOL = %(symbol)s
         ORDER BY DS
     """
     cur = conn.cursor()
-    cur.execute(sql, (symbol,))
+    cur.execute(sql, {"symbol": symbol})
     rows = cur.fetchall()
     cur.close()
     df = pd.DataFrame(rows, columns=["DS", "CLOSE", "SYMBOL"])
@@ -81,6 +82,7 @@ def load_actuals(symbol: str) -> pd.DataFrame:
     df["CLOSE"] = pd.to_numeric(df["CLOSE"], errors="coerce")
     df = df.dropna(subset=["DS", "CLOSE"])
     return df
+
 
 # 5) Sidebar — select from actual symbols present in Snowflake
 symbols = list_symbols()
