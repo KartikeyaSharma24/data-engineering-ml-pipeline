@@ -45,22 +45,27 @@ SYMBOL_COL = "SYMBOL"
 
 # ---------- Cached helpers ----------
 @st.cache_data(ttl=600)
-def list_symbols_forecast_only() -> list[str]:
+def list_symbols_union() -> list[str]:
     """
-    Return only symbols that already have forecast rows.
-    Keeps the UX tight until the pipeline backfills other tickers.
+    Return the union of symbols present in ACTUALS and FORECAST,
+    so the dropdown shows any ticker that has either history or forecast.
     """
     sql = f"""
-        SELECT DISTINCT SYMBOL
-        FROM {FORECAST_TABLE}
-        WHERE SYMBOL IS NOT NULL
-        ORDER BY SYMBOL
+    SELECT SYMBOL FROM (
+      SELECT DISTINCT {SYMBOL_COL} AS SYMBOL FROM {ACTUALS_TABLE}
+      UNION
+      SELECT DISTINCT SYMBOL FROM {FORECAST_TABLE}
+    )
+    WHERE SYMBOL IS NOT NULL
+    ORDER BY SYMBOL
     """
     cur = conn.cursor()
     cur.execute(sql)
     symbols = [row[0] for row in cur.fetchall()]
     cur.close()
-    return sorted({(s or "").strip().upper() for s in symbols if s})
+    # Normalize to uppercase & trimmed
+    symbols = sorted({(s or "").strip().upper() for s in symbols if s})
+    return symbols
 
 @st.cache_data(ttl=600)
 def load_forecast(symbol: str) -> pd.DataFrame:
@@ -111,20 +116,39 @@ def load_actuals(symbol: str) -> pd.DataFrame:
     df["CLOSE"] = pd.to_numeric(df["CLOSE"], errors="coerce")
     return df.dropna(subset=["DS", "CLOSE"])
 
+@st.cache_data(ttl=600)
+def symbol_counts() -> pd.DataFrame:
+    """(Optional debug) Counts per symbol in each table."""
+    sql = f"""
+    SELECT 'ACTUALS' AS SRC, {SYMBOL_COL} AS SYMBOL, COUNT(*) AS N
+    FROM {ACTUALS_TABLE}
+    GROUP BY 1,2
+    UNION ALL
+    SELECT 'FORECAST' AS SRC, SYMBOL, COUNT(*) AS N
+    FROM {FORECAST_TABLE}
+    GROUP BY 1,2
+    ORDER BY SYMBOL, SRC
+    """
+    cur = conn.cursor()
+    cur.execute(sql)
+    rows = cur.fetchall()
+    cur.close()
+    return pd.DataFrame(rows, columns=["SRC", "SYMBOL", "N"])
+
 
 # ---------- Sidebar: symbol + date range ----------
-symbols = list_symbols_forecast_only()
+symbols = list_symbols_union()
 if not symbols:
-    st.error("No symbols found in forecast table. Run your forecasting pipeline to populate STOCK_FORECAST.")
+    st.error("No symbols found in either actuals or forecast tables. Verify your pipeline loaded data.")
     st.stop()
 
 symbol = st.sidebar.selectbox("Symbol", options=symbols, index=0)
 
-# Load full ranges (per selected symbol) to compute min/max for date picker
-df_forecast_all = load_forecast(symbol)   # guaranteed to have rows by design
-df_actuals_all  = load_actuals(symbol)    # may or may not have rows
+# Load both datasets once for THIS symbol to compute min/max bounds
+df_actuals_all = load_actuals(symbol)
+df_forecast_all = load_forecast(symbol)
 
-# Use union of dates across actuals + forecast (for this symbol)
+# Union of dates across actuals + forecast for the selected symbol
 dates_all = pd.concat(
     [
         df_actuals_all[["DS"]] if not df_actuals_all.empty else pd.DataFrame(columns=["DS"]),
@@ -134,7 +158,7 @@ dates_all = pd.concat(
 ).dropna()
 
 if dates_all.empty:
-    st.warning(f"No data available for '{symbol}'.")
+    st.warning(f"No data (actuals or forecast) available for '{symbol}'. Try another symbol.")
     st.stop()
 
 min_date = pd.to_datetime(dates_all["DS"].min()).date()
@@ -167,7 +191,7 @@ df_forecast = df_forecast_all[(df_forecast_all["DS"] >= start_ts) & (df_forecast
 # ---------- Main body ----------
 st.header("📈 Stocks — Actuals & Forecast")
 
-# Overlay chart (both if available; forecast is guaranteed)
+# Overlay chart (shows whichever is available)
 fig_overlay = go.Figure()
 if not df_actuals.empty:
     fig_overlay.add_trace(go.Scatter(
@@ -189,9 +213,6 @@ fig_overlay.update_layout(
     yaxis_title="Price",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
 )
-# Optional: enable an x-axis range scrubber
-# fig_overlay.update_xaxes(rangeslider_visible=True)
-
 st.plotly_chart(fig_overlay, use_container_width=True)
 
 col1, col2 = st.columns(2)
@@ -216,7 +237,7 @@ with col2:
         st.write("NaN counts:", df_forecast.isna().sum().to_dict())
 
     if df_forecast.empty or df_forecast["YHAT"].isna().all():
-        st.warning(f"No forecast rows for '{symbol}' in the selected date range.")
+        st.info(f"No forecast available for '{symbol}' in the selected date range.")
     else:
         fig_forecast = px.line(df_forecast, x="DS", y="YHAT", title=f"Forecast — {symbol}")
         fig_forecast.update_traces(line=dict(color="#4CC9F0", width=2), opacity=1.0)
@@ -244,3 +265,11 @@ with col2:
             ))
             band.update_layout(template="plotly_dark", xaxis_title="Date", yaxis_title="Predicted Close")
             st.plotly_chart(band, use_container_width=True)
+
+# Optional: hidden debugging to confirm coverage across symbols
+with st.expander("Debug (table coverage by symbol)", expanded=False):
+    try:
+        df_counts = symbol_counts()
+        st.dataframe(df_counts, use_container_width=True)
+    except Exception as e:
+        st.write("Counts unavailable:", e)
