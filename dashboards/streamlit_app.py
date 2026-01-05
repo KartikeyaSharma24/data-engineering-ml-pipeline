@@ -44,27 +44,25 @@ CLOSE_COL = "CLOSE"
 SYMBOL_COL = "SYMBOL"
 
 # ---------- Cached helpers ----------
+
 @st.cache_data(ttl=600)
-def list_symbols_union() -> list[str]:
+def list_symbols_forecast_only() -> list[str]:
     """
-    Return the union of symbols present in ACTUALS and FORECAST,
-    so the dropdown shows any ticker that has either history or forecast.
+    Return only symbols that already have forecast rows.
+    Keeps the UX tight until the pipeline backfills other tickers.
     """
     sql = f"""
-    SELECT SYMBOL FROM (
-      SELECT DISTINCT {SYMBOL_COL} AS SYMBOL FROM {ACTUALS_TABLE}
-      UNION
-      SELECT DISTINCT SYMBOL FROM {FORECAST_TABLE}
-    )
-    ORDER BY SYMBOL
+        SELECT DISTINCT SYMBOL
+        FROM {FORECAST_TABLE}
+        WHERE SYMBOL IS NOT NULL
+        ORDER BY SYMBOL
     """
     cur = conn.cursor()
     cur.execute(sql)
     symbols = [row[0] for row in cur.fetchall()]
     cur.close()
-    # Normalize to uppercase & trimmed
-    symbols = sorted({(s or "").strip().upper() for s in symbols if s})
-    return symbols
+    return sorted({(s or "").strip().upper() for s in symbols if s})
+
 
 @st.cache_data(ttl=600)
 def load_forecast(symbol: str) -> pd.DataFrame:
